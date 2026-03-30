@@ -16,7 +16,9 @@
 #include <sys/wait.h>
 #include <sys/mman.h>
 #include <errno.h>
+#ifndef __sgi
 #include <mntent.h>
+#endif
 
 #include <dlfcn.h>
 
@@ -302,57 +304,45 @@ int main (int argc, char **argv)
 
 void Sys_CopyProtect(void)
 {
-	FILE *mnt;
-	struct mntent *ent;
-	char path[MAX_OSPATH];
-	struct stat st;
-	qboolean found_cd = false;
-
 	static qboolean checked = false;
 
 	if (checked)
 		return;
 
-        Com_Printf("XXX - Sys_CopyProtect disabled\n");
+	Com_Printf("XXX - Sys_CopyProtect disabled\n");
 	checked = true;
-	return;
 
-	if ((mnt = setmntent("/etc/mtab", "r")) == NULL)
-		Com_Error(ERR_FATAL, "Can't read mount table to determine mounted cd location.");
+#ifndef __sgi
+	/* mntent-based CD check — Linux only, disabled on IRIX */
+	{
+		FILE *mnt;
+		struct mntent *ent;
+		char path[MAX_OSPATH];
+		struct stat st;
+		qboolean found_cd = false;
 
-	while ((ent = getmntent(mnt)) != NULL) {
-		if (strcmp(ent->mnt_type, "iso9660") == 0) {
-			// found a cd file system
-			found_cd = true;
-			sprintf(path, "%s/%s", ent->mnt_dir, "install/data/quake2.exe");
-			if (stat(path, &st) == 0) {
-				// found it
-				checked = true;
-				endmntent(mnt);
-				return;
-			}
-			sprintf(path, "%s/%s", ent->mnt_dir, "Install/Data/quake2.exe");
-			if (stat(path, &st) == 0) {
-				// found it
-				checked = true;
-				endmntent(mnt);
-				return;
-			}
-			sprintf(path, "%s/%s", ent->mnt_dir, "quake2.exe");
-			if (stat(path, &st) == 0) {
-				// found it
-				checked = true;
-				endmntent(mnt);
-				return;
+		if ((mnt = setmntent("/etc/mtab", "r")) == NULL)
+			Com_Error(ERR_FATAL, "Can't read mount table to determine mounted cd location.");
+
+		while ((ent = getmntent(mnt)) != NULL) {
+			if (strcmp(ent->mnt_type, "iso9660") == 0) {
+				found_cd = true;
+				sprintf(path, "%s/%s", ent->mnt_dir, "install/data/quake2.exe");
+				if (stat(path, &st) == 0) { checked = true; endmntent(mnt); return; }
+				sprintf(path, "%s/%s", ent->mnt_dir, "Install/Data/quake2.exe");
+				if (stat(path, &st) == 0) { checked = true; endmntent(mnt); return; }
+				sprintf(path, "%s/%s", ent->mnt_dir, "quake2.exe");
+				if (stat(path, &st) == 0) { checked = true; endmntent(mnt); return; }
 			}
 		}
-	}
-	endmntent(mnt);
+		endmntent(mnt);
 
-	if (found_cd)
-		Com_Error (ERR_FATAL, "Could not find a Quake2 CD in your CD drive.");
-	Com_Error (ERR_FATAL, "Unable to find a mounted iso9660 file system.\n"
-		"You must mount the Quake2 CD in a cdrom drive in order to play.");
+		if (found_cd)
+			Com_Error(ERR_FATAL, "Could not find a Quake2 CD in your CD drive.");
+		Com_Error(ERR_FATAL, "Unable to find a mounted iso9660 file system.\n"
+			"You must mount the Quake2 CD in a cdrom drive in order to play.");
+	}
+#endif
 }
 
 #if 0

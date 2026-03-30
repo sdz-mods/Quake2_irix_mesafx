@@ -352,9 +352,11 @@ void ( APIENTRY * qglViewport )(GLint x, GLint y, GLsizei width, GLsizei height)
 
 void ( APIENTRY * qglPointParameterfEXT)( GLenum param, GLfloat value );
 void ( APIENTRY * qglPointParameterfvEXT)( GLenum param, const GLfloat *value );
-void ( APIENTRY * qglColorTableEXT)( int, int, int, int, int, const void * );
+void ( APIENTRY * qglColorTableEXT)( GLenum target, GLenum internalformat, GLsizei width, GLenum format, GLenum type, const GLvoid *table );
 void ( APIENTRY * qglSelectTextureSGIS)( GLenum );
 void ( APIENTRY * qglMTexCoord2fSGIS)( GLenum, GLfloat, GLfloat );
+void ( APIENTRY * qglLockArraysEXT)( GLint first, GLsizei count );
+void ( APIENTRY * qglUnlockArraysEXT)( void );
 
 static void ( APIENTRY * dllAccum )(GLenum op, GLfloat value);
 static void ( APIENTRY * dllAlphaFunc )(GLenum func, GLclampf ref);
@@ -2928,6 +2930,7 @@ void QGL_Shutdown( void )
 
 }
 
+
 /*
 ** QGL_Init
 **
@@ -3141,6 +3144,7 @@ qboolean QGL_Init( const char *dllname )
 	qglPixelTransferf            = 	dllPixelTransferf            = glPixelTransferf;
 	qglPixelTransferi            = 	dllPixelTransferi            = glPixelTransferi;
 	qglPixelZoom                 = 	dllPixelZoom                 = glPixelZoom;
+	dllPointSize                 = 	glPointSize;
 	qglPointSize                 = 	dllPointSize                 = glPointSize;
 	qglPolygonMode               = 	dllPolygonMode               = glPolygonMode;
 	qglPolygonOffset             = 	dllPolygonOffset             = glPolygonOffset;
@@ -3281,10 +3285,11 @@ qboolean QGL_Init( const char *dllname )
 
 	qglPointParameterfEXT = 0;
 	qglPointParameterfvEXT = 0;
-	qglColorTableEXT = glColorTableSGI;
 	qglColorTableEXT = 0;
 	qglSelectTextureSGIS = 0;
 	qglMTexCoord2fSGIS = 0;
+	qglLockArraysEXT = 0;
+	qglUnlockArraysEXT = 0;
 
 	return true;
 }
@@ -3993,5 +3998,3 @@ void GLimp_LogNewFrame( void )
 {
 	fprintf( log_fp, "*** R_BeginFrame ***\n");
 }
-
-

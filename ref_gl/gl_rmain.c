@@ -466,22 +466,31 @@ R_DrawParticles
 */
 void R_DrawParticles (void)
 {
-	if ( gl_ext_pointparameters->value && qglPointParameterfEXT )
+	if ( gl_ext_pointparameters->value &&
+		( qglPointParameterfEXT || ( gl_config.renderer & ( GL_RENDERER_VOODOO | GL_RENDERER_VOODOO2 ) ) ) )
 	{
 		int i;
 		unsigned char color[4];
 		const particle_t *p;
+		float point_size;
 
 		qglDepthMask( GL_FALSE );
 		qglEnable( GL_BLEND );
 		qglDisable( GL_TEXTURE_2D );
 
-		qglPointSize( gl_particle_size->value );
+		if ( qglPointParameterfEXT )
+			point_size = gl_particle_size->value;
+		else
+			point_size = ( gl_particle_min_size->value > 1.0f ) ? gl_particle_min_size->value : 2.0f;
+
+		qglPointSize( point_size );
 
 		qglBegin( GL_POINTS );
 		for ( i = 0, p = r_newrefdef.particles; i < r_newrefdef.num_particles; i++, p++ )
 		{
-			*(int *)color = d_8to24table[p->color];
+			color[0] = ((byte *)&d_8to24table[p->color])[0];
+			color[1] = ((byte *)&d_8to24table[p->color])[1];
+			color[2] = ((byte *)&d_8to24table[p->color])[2];
 			color[3] = p->alpha*255;
 
 			qglColor4ubv( color );
@@ -1256,6 +1265,7 @@ int R_Init( void *hinstance, void *hWnd )
 		ri.Con_Printf( PRINT_ALL, "...GL_EXT_compiled_vertex_array not found\n" );
 	}
 
+#ifdef WIN32
 	if ( strstr( gl_config.extensions_string, "WGL_EXT_swap_control" ) )
 	{
 		qwglSwapIntervalEXT = ( BOOL (WINAPI *)(int)) qwglGetProcAddress( "wglSwapIntervalEXT" );
@@ -1265,6 +1275,7 @@ int R_Init( void *hinstance, void *hWnd )
 	{
 		ri.Con_Printf( PRINT_ALL, "...WGL_EXT_swap_control not found\n" );
 	}
+#endif
 
 	if ( strstr( gl_config.extensions_string, "GL_EXT_point_parameters" ) )
 	{
@@ -1514,9 +1525,9 @@ void R_SetPalette ( const unsigned char *palette)
 	{
 		for ( i = 0; i < 256; i++ )
 		{
-			rp[i*4+0] = d_8to24table[i] & 0xff;
-			rp[i*4+1] = ( d_8to24table[i] >> 8 ) & 0xff;
-			rp[i*4+2] = ( d_8to24table[i] >> 16 ) & 0xff;
+			rp[i*4+0] = ((byte *)&d_8to24table[i])[0];
+			rp[i*4+1] = ((byte *)&d_8to24table[i])[1];
+			rp[i*4+2] = ((byte *)&d_8to24table[i])[2];
 			rp[i*4+3] = 0xff;
 		}
 	}
@@ -1571,9 +1582,9 @@ void R_DrawBeam( entity_t *e )
 	qglEnable( GL_BLEND );
 	qglDepthMask( GL_FALSE );
 
-	r = ( d_8to24table[e->skinnum & 0xFF] ) & 0xFF;
-	g = ( d_8to24table[e->skinnum & 0xFF] >> 8 ) & 0xFF;
-	b = ( d_8to24table[e->skinnum & 0xFF] >> 16 ) & 0xFF;
+	r = ((byte *)&d_8to24table[e->skinnum & 0xFF])[0];
+	g = ((byte *)&d_8to24table[e->skinnum & 0xFF])[1];
+	b = ((byte *)&d_8to24table[e->skinnum & 0xFF])[2];
 
 	r *= 1/255.0F;
 	g *= 1/255.0F;

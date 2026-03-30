@@ -1,0 +1,215 @@
+#!smake
+#
+# Makefile.irixfx — Build Quake2 for IRIX 6.5 with fxMesa (Voodoo/Glide)
+#
+# Run from Quake2_irix_3dfx/:
+#   smake -f irix/Makefile.irixfx MESA_ROOT=/path/to/MesaFX_irix GLIDE_ROOT=/path/to/glide_irix
+#
+# Build order (prerequisite installs):
+#   1. glide_irix:   smake -f Makefile.glide_irix install
+#   2. MesaFX_irix:  smake -f Makefile.irixfx install
+#   3. here
+#
+# Output: bin_irix/quake2
+#
+# REF_HARD_LINKED: renderer + game compiled directly into the binary;
+# no .so loading needed.  gamemips.so is NOT built.
+
+MESA_ROOT  =
+GLIDE_ROOT =
+
+CC      = cc
+ABI     = -n32
+MIPSISA = -mips4
+
+ODIR   = obj_irix
+TARGET = quake2
+
+DEFINES = -DREF_HARD_LINKED \
+          -D__sgi__ \
+          -DIRIX=1 \
+          -Dstricmp=strcasecmp
+
+INCS    = -I. \
+          -Iirix \
+          -Ilinux \
+          -I$(MESA_ROOT)/include \
+          -I$(GLIDE_ROOT)/glide2x/sst1/glide/src \
+          -I$(GLIDE_ROOT)/swlibs/fxmisc \
+          -I$(GLIDE_ROOT)/glide2x/sst1/init
+
+CFLAGS  = $(ABI) $(MIPSISA) -O2 -Xcpluscomm \
+          $(DEFINES) $(INCS) \
+          -woff 84,513,594,596,1174,1209,1521
+
+LDFLAGS = $(ABI) $(MIPSISA) -woff 15
+
+LIBS    = -L$(MESA_ROOT)/lib32 -lGL -lGLU \
+          -L/usr/lib32 -lglide2x \
+          -laudio -lcdaudio -ldmedia \
+          -lm -ldl
+
+# -------------------------------------------------------------------------
+# Source groups
+# -------------------------------------------------------------------------
+
+IRIX_SRC = \
+	irix/sys_irix.c \
+	irix/vid_so.c \
+	irix/vid_menu.c \
+	irix/glw_imp.c \
+	irix/qgl_irix.c \
+	irix/q_shirix.c \
+	irix/snd_irix.c \
+	irix/cd_irix.c
+
+REFGL_SRC = \
+	ref_gl/gl_draw.c \
+	ref_gl/gl_image.c \
+	ref_gl/gl_light.c \
+	ref_gl/gl_mesh.c \
+	ref_gl/gl_model.c \
+	ref_gl/gl_rmain.c \
+	ref_gl/gl_rmisc.c \
+	ref_gl/gl_rsurf.c \
+	ref_gl/gl_warp.c
+
+CLIENT_SRC = \
+	client/cl_ents.c \
+	client/cl_fx.c \
+	client/cl_input.c \
+	client/cl_inv.c \
+	client/cl_main.c \
+	client/cl_newfx.c \
+	client/cl_parse.c \
+	client/cl_pred.c \
+	client/cl_scrn.c \
+	client/cl_tent.c \
+	client/cl_view.c \
+	client/cl_cin.c \
+	client/console.c \
+	client/keys.c \
+	client/menu.c \
+	client/qmenu.c \
+	client/snd_dma.c \
+	client/snd_mem.c \
+	client/snd_mix.c
+
+SERVER_SRC = \
+	server/sv_ccmds.c \
+	server/sv_ents.c \
+	server/sv_game.c \
+	server/sv_init.c \
+	server/sv_main.c \
+	server/sv_send.c \
+	server/sv_user.c \
+	server/sv_world.c
+
+COMMON_SRC = \
+	qcommon/cmd.c \
+	qcommon/cmodel.c \
+	qcommon/common.c \
+	qcommon/crc.c \
+	qcommon/cvar.c \
+	qcommon/files.c \
+	qcommon/md4.c \
+	qcommon/net_chan.c \
+	qcommon/pmove.c \
+	linux/net_udp.c \
+	linux/glob.c
+
+GAME_SRC = \
+	game/g_ai.c \
+	game/g_chase.c \
+	game/g_cmds.c \
+	game/g_combat.c \
+	game/g_func.c \
+	game/g_items.c \
+	game/g_main.c \
+	game/g_misc.c \
+	game/g_monster.c \
+	game/g_phys.c \
+	game/g_save.c \
+	game/g_spawn.c \
+	game/g_svcmds.c \
+	game/g_target.c \
+	game/g_trigger.c \
+	game/g_turret.c \
+	game/g_utils.c \
+	game/g_weapon.c \
+	game/m_actor.c \
+	game/m_berserk.c \
+	game/m_boss2.c \
+	game/m_boss3.c \
+	game/m_boss31.c \
+	game/m_boss32.c \
+	game/m_brain.c \
+	game/m_chick.c \
+	game/m_flash.c \
+	game/m_flipper.c \
+	game/m_float.c \
+	game/m_flyer.c \
+	game/m_gladiator.c \
+	game/m_gunner.c \
+	game/m_hover.c \
+	game/m_infantry.c \
+	game/m_insane.c \
+	game/m_medic.c \
+	game/m_move.c \
+	game/m_mutant.c \
+	game/m_parasite.c \
+	game/m_soldier.c \
+	game/m_supertank.c \
+	game/m_tank.c \
+	game/p_client.c \
+	game/p_hud.c \
+	game/p_trail.c \
+	game/p_view.c \
+	game/p_weapon.c \
+	game/q_shared.c
+
+ALL_SRC = \
+	$(IRIX_SRC) \
+	$(REFGL_SRC) \
+	$(CLIENT_SRC) \
+	$(SERVER_SRC) \
+	$(COMMON_SRC) \
+	$(GAME_SRC)
+
+# -------------------------------------------------------------------------
+# Targets
+# -------------------------------------------------------------------------
+
+.PHONY: all clean
+
+all:
+	@if [ -z "$(MESA_ROOT)" ]; then \
+	    echo ""; \
+	    echo "ERROR: MESA_ROOT is not set."; \
+	    echo "Usage: smake -f irix/Makefile.irixfx MESA_ROOT=/path/to/MesaFX_irix GLIDE_ROOT=/path/to/glide_irix"; \
+	    echo ""; \
+	    exit 1; \
+	fi
+	@if [ -z "$(GLIDE_ROOT)" ]; then \
+	    echo ""; \
+	    echo "ERROR: GLIDE_ROOT is not set."; \
+	    echo "Usage: smake -f irix/Makefile.irixfx MESA_ROOT=/path/to/MesaFX_irix GLIDE_ROOT=/path/to/glide_irix"; \
+	    echo ""; \
+	    exit 1; \
+	fi
+	-mkdir $(ODIR)
+	@echo "--- Compiling ($(CC) -n32 -mips4) ---"
+	@for f in $(ALL_SRC); do \
+	    base=`basename $$f .c`; \
+	    echo "  cc $$f"; \
+	    $(CC) $(CFLAGS) -E $$f | tr -d '\015' > /tmp/_q2irix_$$base.i || exit 1; \
+	    $(CC) $(CFLAGS) -c /tmp/_q2irix_$$base.i -o $(ODIR)/$$base.o || exit 1; \
+	done
+	@echo "--- Linking $(TARGET) ---"
+	$(CC) $(LDFLAGS) -o $(TARGET) $(ODIR)/*.o $(LIBS)
+	@echo "Built: $(TARGET)"
+
+clean:
+	rm -rf $(ODIR)
+	rm -f $(TARGET)
+	rm -f /tmp/_q2irix_*.i

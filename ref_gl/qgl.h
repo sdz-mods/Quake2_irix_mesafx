@@ -376,9 +376,9 @@ extern  void ( APIENTRY * qglViewport )(GLint x, GLint y, GLsizei width, GLsizei
 
 extern	void ( APIENTRY * qglPointParameterfEXT)( GLenum param, GLfloat value );
 extern	void ( APIENTRY * qglPointParameterfvEXT)( GLenum param, const GLfloat *value );
-extern	void ( APIENTRY * qglColorTableEXT)( int, int, int, int, int, const void * );
+extern	void ( APIENTRY * qglColorTableEXT)( GLenum target, GLenum internalformat, GLsizei width, GLenum format, GLenum type, const GLvoid *table );
 
-extern	void ( APIENTRY * qglLockArraysEXT) (int , int);
+extern	void ( APIENTRY * qglLockArraysEXT) (GLint first, GLsizei count);
 extern	void ( APIENTRY * qglUnlockArraysEXT) (void);
 
 extern	void ( APIENTRY * qglMTexCoord2fSGIS)( GLenum, GLfloat, GLfloat );

@@ -34,7 +34,6 @@ unsigned	d_8to24table[256];
 qboolean GL_Upload8 (byte *data, int width, int height,  qboolean mipmap, qboolean is_sky );
 qboolean GL_Upload32 (unsigned *data, int width, int height,  qboolean mipmap);
 
-
 int		gl_solid_format = 3;
 int		gl_alpha_format = 4;
 
@@ -771,11 +770,15 @@ void R_FloodFillSkin( byte *skin, int skinwidth, int skinheight )
 		filledcolor = 0;
 		// attempt to find opaque black
 		for (i = 0; i < 256; ++i)
-			if (d_8to24table[i] == (255 << 0)) // alpha 1.0
+		{
+			byte *rgba = (byte *)&d_8to24table[i];
+			if (rgba[0] == 0 && rgba[1] == 0 &&
+				rgba[2] == 0 && rgba[3] == 255)
 			{
 				filledcolor = i;
 				break;
 			}
+		}
 	}
 
 	// can't fill to filled color or to transparent color (used as visited marker)
@@ -1473,12 +1476,18 @@ int Draw_GetPalette (void)
 		r = pal[i*3+0];
 		g = pal[i*3+1];
 		b = pal[i*3+2];
-		
-		v = (255<<24) + (r<<0) + (g<<8) + (b<<16);
-		d_8to24table[i] = LittleLong(v);
+
+		/* Store RGBA bytes directly in memory order so glTexImage2D(GL_RGBA,
+		 * GL_UNSIGNED_BYTE) reads them correctly on both little- and big-endian
+		 * (IRIX) systems.  The old LittleLong(v) construction produced [B,G,R,A]
+		 * in memory on big-endian, causing a red/blue channel swap. */
+		((byte *)&d_8to24table[i])[0] = r;
+		((byte *)&d_8to24table[i])[1] = g;
+		((byte *)&d_8to24table[i])[2] = b;
+		((byte *)&d_8to24table[i])[3] = 255;
 	}
 
-	d_8to24table[255] &= LittleLong(0xffffff);	// 255 is transparent
+	((byte *)&d_8to24table[255])[3] = 0;	// 255 is transparent
 
 	free (pic);
 	free (pal);
@@ -1568,4 +1577,3 @@ void	GL_ShutdownImages (void)
 		memset (image, 0, sizeof(*image));
 	}
 }
-
