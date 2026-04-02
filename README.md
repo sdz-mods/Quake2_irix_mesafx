@@ -2,8 +2,6 @@
 
 Quake2 with MesaFX backend port for IRIX.
 
-Current limitations: keyboard input is via stdin. Mouse not yet supported.
-
 ## Building
 
 ### Prerequisites
