@@ -1104,6 +1104,29 @@ qboolean R_SetMode (void)
 	return true;
 }
 
+#ifndef WIN32
+/*
+** IRIX/MesaFX: wrap GL_ARB_multitexture to present the SGIS interface that
+** Quake2's ref_gl uses internally.  Only activated on real dual-TMU hardware
+** (haveTwoTMUs=1), detected via GL_EXT_texture_env_add presence.
+*/
+#ifndef GL_TEXTURE0_ARB
+#define GL_TEXTURE0_ARB 0x84C0
+#define GL_TEXTURE1_ARB 0x84C1
+#endif
+extern void glActiveTextureARB( GLenum );
+extern void glMultiTexCoord2fARB( GLenum, GLfloat, GLfloat );
+
+static void mfx_SelectTextureSGIS( GLenum texture )
+{
+	glActiveTextureARB( texture == GL_TEXTURE1_SGIS ? GL_TEXTURE1_ARB : GL_TEXTURE0_ARB );
+}
+static void mfx_MTexCoord2fSGIS( GLenum texture, GLfloat s, GLfloat t )
+{
+	glMultiTexCoord2fARB( texture == GL_TEXTURE1_SGIS ? GL_TEXTURE1_ARB : GL_TEXTURE0_ARB, s, t );
+}
+#endif /* !WIN32 */
+
 /*
 ===============
 R_Init
@@ -1329,6 +1352,35 @@ int R_Init( void *hinstance, void *hWnd )
 	else
 	{
 		ri.Con_Printf( PRINT_ALL, "...GL_SGIS_multitexture not found\n" );
+	}
+#else /* !WIN32 — IRIX/MesaFX path */
+	/*
+	** MesaFX always exposes GL_ARB_multitexture (emulateTwoTMUs=1) even on
+	** single-TMU hardware, but on 1-TMU cards the dual-TMU path in fxsetup.c
+	** only activates fxSetupTextureSingleTMU_NoLock (multipass is disabled),
+	** so the lightmap unit is silently dropped — flat textures result.
+	**
+	** GL_EXT_texture_env_add is enabled only when haveTwoTMUs=1 (real hardware
+	** 2-TMU).  Use it as the guard so single-TMU cards stay on the explicit
+	** two-pass single-TMU path where lightmaps work correctly.
+	*/
+	if ( strstr( gl_config.extensions_string, "GL_ARB_multitexture" ) &&
+	     strstr( gl_config.extensions_string, "GL_EXT_texture_env_add" ) )
+	{
+		if ( gl_ext_multitexture->value )
+		{
+			ri.Con_Printf( PRINT_ALL, "...using GL_ARB_multitexture (GL_SGIS_multitexture wrapper, haveTwoTMUs=1)\n" );
+			qglSelectTextureSGIS = mfx_SelectTextureSGIS;
+			qglMTexCoord2fSGIS   = mfx_MTexCoord2fSGIS;
+		}
+		else
+		{
+			ri.Con_Printf( PRINT_ALL, "...ignoring GL_ARB_multitexture\n" );
+		}
+	}
+	else
+	{
+		ri.Con_Printf( PRINT_ALL, "...GL_ARB_multitexture not found or single-TMU, using single-TMU path\n" );
 	}
 #endif
 

@@ -53,14 +53,35 @@ typedef struct
 	// the lightmap texture data needs to be kept in
 	// main memory so texsubimage can update properly
 	byte		lightmap_buffer[4*BLOCK_WIDTH*BLOCK_HEIGHT];
+
+	/* Per-atlas CPU copies.  Dynamic surface data is written here during the
+	** update pass; one glTexSubImage2D per dirty atlas is issued at the end,
+	** triggering one MesaFX TRAM download per atlas instead of one per
+	** dynamic surface. */
+	byte   *atlas_cpu[MAX_LIGHTMAPS];
+	int     atlas_dirty_min[MAX_LIGHTMAPS]; /* first dirty row; BLOCK_HEIGHT = clean */
+	int     atlas_dirty_max[MAX_LIGHTMAPS]; /* one past last dirty row; 0 = clean */
+
+	/* Per-frame skyline allocator for the dlight scratch (atlas 0).
+	** Atlas 0 is always free: static allocation starts at atlas 1.
+	** Reset at the end of each GL_RenderLightmapChains call. */
+	int     dyn_allocated[BLOCK_WIDTH];
 } gllightmapstate_t;
 
 static gllightmapstate_t gl_lms;
 
+/* Dual-TMU batching: separate update pass (upload lightmaps) from render pass
+** (draw surfaces).  Batching all glTexSubImage2D calls before any draw reduces
+** MesaFX TRAM downloads from one-per-surface to one-per-dirty-atlas. */
+static qboolean         gl_lm_update_pass;
+static msurface_t      *gl_lm_render_head;
+static msurface_t      *gl_lm_render_tail;
 
 static void		LM_InitBlock( void );
 static void		LM_UploadBlock( qboolean dynamic );
 static qboolean	LM_AllocBlock (int w, int h, int *x, int *y);
+static qboolean	LM_DynAllocBlock (int w, int h, int *x, int *y);
+static void		GL_RenderLightmapChains( void );
 
 extern void R_SetCacheState( msurface_t *surf );
 extern void R_BuildLightMap (msurface_t *surf, byte *dest, int stride);
@@ -726,47 +747,116 @@ dynamic:
 		}
 	}
 
-	if ( is_dynamic )
+	if ( gl_lm_update_pass )
 	{
-		unsigned	temp[128*128];
-		int			smax, tmax;
+		/*
+		** Update pass — two paths for dynamic surfaces:
+		**
+		** Style-animated (styles[map] >= 32 or == 0, no active dlight):
+		**   Write rebuilt data into atlas_cpu[lightmaptexturenum] at (light_s, light_t).
+		**   One glTexSubImage2D per dirty own-atlas in GL_RenderLightmapChains.
+		**
+		** Dlight-only (active dlight, no style change):
+		**   Pack into atlas 0 (the dedicated dlight scratch) at (dlight_s, dlight_t)
+		**   allocated per-frame via dyn_allocated[].  Atlas 0 is always free because
+		**   static allocation starts at atlas 1.  UV offset applied at render time:
+		**     TMU1_s = v[5] - (light_s - dlight_s)/128
+		**   One glTexSubImage2D for atlas 0 covers all dlight surfaces this frame.
+		**
+		** cached_dlight: set when dlight data is written.  On the NEXT frame, if
+		**   the surface is no longer dynamic, we rebuild static data and restore
+		**   the own atlas so the baked lightmap reappears.
+		*/
+		unsigned   temp[128*128];
+		int        smax, tmax, lmtex_up, row, do_update;
+		byte      *dst;
+		const byte *src;
 
-		if ( ( surf->styles[map] >= 32 || surf->styles[map] == 0 ) && ( surf->dlightframe != r_framecount ) )
+		do_update = 0;
+		lmtex_up  = surf->lightmaptexturenum;	/* default; may be overridden */
+
+		if ( is_dynamic )
 		{
 			smax = (surf->extents[0]>>4)+1;
 			tmax = (surf->extents[1]>>4)+1;
 
-			R_BuildLightMap( surf, (void *)temp, smax*4 );
-			R_SetCacheState( surf );
-
-			GL_MBind( GL_TEXTURE1_SGIS, gl_state.lightmap_textures + surf->lightmaptexturenum );
-
-			lmtex = surf->lightmaptexturenum;
-
-			qglTexSubImage2D( GL_TEXTURE_2D, 0,
-							  surf->light_s, surf->light_t, 
-							  smax, tmax, 
-							  GL_LIGHTMAP_FORMAT, 
-							  GL_UNSIGNED_BYTE, temp );
-
+			if ( ( surf->styles[map] >= 32 || surf->styles[map] == 0 ) && ( surf->dlightframe != r_framecount ) )
+			{
+				/* Style-animated: write rebuilt data to surface's own atlas. */
+				R_BuildLightMap( surf, (void *)temp, smax*4 );
+				R_SetCacheState( surf );
+				do_update = 1;
+			}
+			else
+			{
+				/* Dlight-only: pack into atlas 0 at (dlight_s, dlight_t).
+				** Atlas 0 is always free (static allocation starts at atlas 1).
+				** Own atlas N is never touched, so it retains baked static data;
+				** no restore pass is needed when the dlight expires. */
+				if ( gl_lms.atlas_cpu[0] &&
+				     LM_DynAllocBlock( smax, tmax, &surf->dlight_s, &surf->dlight_t ) )
+				{
+					byte *base = gl_lms.atlas_cpu[0] +
+					             ( surf->dlight_t * BLOCK_WIDTH + surf->dlight_s ) * LIGHTMAP_BYTES;
+					R_BuildLightMap( surf, base, BLOCK_WIDTH * LIGHTMAP_BYTES );
+					if ( surf->dlight_t < gl_lms.atlas_dirty_min[0] )
+						gl_lms.atlas_dirty_min[0] = surf->dlight_t;
+					if ( surf->dlight_t + tmax > gl_lms.atlas_dirty_max[0] )
+						gl_lms.atlas_dirty_max[0] = surf->dlight_t + tmax;
+					/* do_update stays 0: atlas 0 dirty range tracked above. */
+				}
+				else
+				{
+					/* Overflow (essentially unreachable): fall back to own atlas. */
+					surf->dlight_s = surf->light_s;
+					surf->dlight_t = surf->light_t;
+					R_BuildLightMap( surf, (void *)temp, smax*4 );
+					do_update = 1;
+				}
+			}
 		}
-		else
+
+		if ( do_update && gl_lms.atlas_cpu[lmtex_up] )
 		{
-			smax = (surf->extents[0]>>4)+1;
-			tmax = (surf->extents[1]>>4)+1;
+			dst = gl_lms.atlas_cpu[lmtex_up] +
+			      ( surf->light_t * BLOCK_WIDTH + surf->light_s ) * LIGHTMAP_BYTES;
+			src = (const byte *)temp;
+			for ( row = 0; row < tmax; row++,
+			      dst += BLOCK_WIDTH * LIGHTMAP_BYTES,
+			      src += smax * LIGHTMAP_BYTES )
+				memcpy( dst, src, smax * LIGHTMAP_BYTES );
 
-			R_BuildLightMap( surf, (void *)temp, smax*4 );
+			if ( surf->light_t < gl_lms.atlas_dirty_min[lmtex_up] )
+				gl_lms.atlas_dirty_min[lmtex_up] = surf->light_t;
+			if ( surf->light_t + tmax > gl_lms.atlas_dirty_max[lmtex_up] )
+				gl_lms.atlas_dirty_max[lmtex_up] = surf->light_t + tmax;
+		}
 
-			GL_MBind( GL_TEXTURE1_SGIS, gl_state.lightmap_textures + 0 );
+		/* Append to FIFO render chain (preserves BSP front-to-back order). */
+		surf->lightmapchain = NULL;
+		if ( !gl_lm_render_head )
+			gl_lm_render_head = surf;
+		else
+			gl_lm_render_tail->lightmapchain = surf;
+		gl_lm_render_tail = surf;
+		return;
+	}
 
-			lmtex = 0;
+	/*
+	** Render pass: atlases already uploaded by GL_RenderLightmapChains.
+	** Dlight-only surfaces use atlas 0; UV offset shifts from static coords
+	** (light_s, light_t) to dyn coords (dlight_s, dlight_t).
+	** Style-animated and static surfaces use their own atlas with no offset.
+	*/
+	{
+		float lm_s_off = 0.0f, lm_t_off = 0.0f;
 
-			qglTexSubImage2D( GL_TEXTURE_2D, 0,
-							  surf->light_s, surf->light_t, 
-							  smax, tmax, 
-							  GL_LIGHTMAP_FORMAT, 
-							  GL_UNSIGNED_BYTE, temp );
-
+		if ( is_dynamic &&
+		     !( ( surf->styles[map] >= 32 || surf->styles[map] == 0 ) && ( surf->dlightframe != r_framecount ) ) )
+		{
+			lmtex    = 0;
+			lm_s_off = ( surf->light_s - surf->dlight_s ) * ( 1.0f / 128.0f );
+			lm_t_off = ( surf->light_t - surf->dlight_t ) * ( 1.0f / 128.0f );
 		}
 
 		c_brush_polys++;
@@ -779,7 +869,7 @@ dynamic:
 		if (surf->texinfo->flags & SURF_FLOWING)
 		{
 			float scroll;
-		
+
 			scroll = -64 * ( (r_newrefdef.time / 40.0) - (int)(r_newrefdef.time / 40.0) );
 			if(scroll == 0.0)
 				scroll = -64.0;
@@ -791,7 +881,7 @@ dynamic:
 				for (i=0 ; i< nv; i++, v+= VERTEXSIZE)
 				{
 					qglMTexCoord2fSGIS( GL_TEXTURE0_SGIS, (v[3]+scroll), v[4]);
-					qglMTexCoord2fSGIS( GL_TEXTURE1_SGIS, v[5], v[6]);
+					qglMTexCoord2fSGIS( GL_TEXTURE1_SGIS, v[5]-lm_s_off, v[6]-lm_t_off);
 					qglVertex3fv (v);
 				}
 				qglEnd ();
@@ -806,7 +896,7 @@ dynamic:
 				for (i=0 ; i< nv; i++, v+= VERTEXSIZE)
 				{
 					qglMTexCoord2fSGIS( GL_TEXTURE0_SGIS, v[3], v[4]);
-					qglMTexCoord2fSGIS( GL_TEXTURE1_SGIS, v[5], v[6]);
+					qglMTexCoord2fSGIS( GL_TEXTURE1_SGIS, v[5]-lm_s_off, v[6]-lm_t_off);
 					qglVertex3fv (v);
 				}
 				qglEnd ();
@@ -815,58 +905,43 @@ dynamic:
 //PGM
 //==========
 	}
-	else
+}
+
+static void GL_RenderLightmapChains( void )
+{
+	int i;
+	msurface_t *surf;
+
+	/*
+	** Flush dirty atlases.  One glTexSubImage2D per dirty atlas fires
+	** fxTMReloadMipMapLevel once; all subsequent draws from the same atlas
+	** this frame hit TRAM without a re-download.
+	*/
+	for ( i = 0; i < MAX_LIGHTMAPS; i++ )
 	{
-		c_brush_polys++;
-
-		GL_MBind( GL_TEXTURE0_SGIS, image->texnum );
-		GL_MBind( GL_TEXTURE1_SGIS, gl_state.lightmap_textures + lmtex );
-
-//==========
-//PGM
-		if (surf->texinfo->flags & SURF_FLOWING)
+		if ( gl_lms.atlas_dirty_min[i] < gl_lms.atlas_dirty_max[i] && gl_lms.atlas_cpu[i] )
 		{
-			float scroll;
-		
-			scroll = -64 * ( (r_newrefdef.time / 40.0) - (int)(r_newrefdef.time / 40.0) );
-			if(scroll == 0.0)
-				scroll = -64.0;
-
-			for ( p = surf->polys; p; p = p->chain )
-			{
-				v = p->verts[0];
-				qglBegin (GL_POLYGON);
-				for (i=0 ; i< nv; i++, v+= VERTEXSIZE)
-				{
-					qglMTexCoord2fSGIS( GL_TEXTURE0_SGIS, (v[3]+scroll), v[4]);
-					qglMTexCoord2fSGIS( GL_TEXTURE1_SGIS, v[5], v[6]);
-					qglVertex3fv (v);
-				}
-				qglEnd ();
-			}
+			GL_MBind( GL_TEXTURE1_SGIS, gl_state.lightmap_textures + i );
+			qglTexSubImage2D( GL_TEXTURE_2D, 0,
+			                  0, gl_lms.atlas_dirty_min[i],
+			                  BLOCK_WIDTH,
+			                  gl_lms.atlas_dirty_max[i] - gl_lms.atlas_dirty_min[i],
+			                  GL_LIGHTMAP_FORMAT, GL_UNSIGNED_BYTE,
+			                  gl_lms.atlas_cpu[i] +
+			                  gl_lms.atlas_dirty_min[i] * BLOCK_WIDTH * LIGHTMAP_BYTES );
+			gl_lms.atlas_dirty_min[i] = BLOCK_HEIGHT;
+			gl_lms.atlas_dirty_max[i] = 0;
 		}
-		else
-		{
-//PGM
-//==========
-			for ( p = surf->polys; p; p = p->chain )
-			{
-				v = p->verts[0];
-				qglBegin (GL_POLYGON);
-				for (i=0 ; i< nv; i++, v+= VERTEXSIZE)
-				{
-					qglMTexCoord2fSGIS( GL_TEXTURE0_SGIS, v[3], v[4]);
-					qglMTexCoord2fSGIS( GL_TEXTURE1_SGIS, v[5], v[6]);
-					qglVertex3fv (v);
-				}
-				qglEnd ();
-			}
-//==========
-//PGM
-		}
-//PGM
-//==========
 	}
+
+	/* Render the FIFO chain. */
+	for ( surf = gl_lm_render_head; surf; surf = surf->lightmapchain )
+		GL_RenderLightmappedPoly( surf );
+	gl_lm_render_head = NULL;
+	gl_lm_render_tail = NULL;
+
+	/* Reset dyn atlas allocation for the next model's update pass. */
+	memset( gl_lms.dyn_allocated, 0, sizeof( gl_lms.dyn_allocated ) );
 }
 
 /*
@@ -901,44 +976,82 @@ void R_DrawInlineBModel (void)
 		GL_TexEnv( GL_MODULATE );
 	}
 
-	//
-	// draw texture
-	//
-	for (i=0 ; i<currentmodel->nummodelsurfaces ; i++, psurf++)
+	if ( qglMTexCoord2fSGIS )
 	{
-	// find which side of the node we are on
-		pplane = psurf->plane;
-
-		dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
-
-	// draw the polygon
-		if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
-			(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
+		// Pass 1: update CPU atlas copies for dynamic MT surfaces, build FIFO chain
+		gl_lm_update_pass = true;
+		for (i=0 ; i<currentmodel->nummodelsurfaces ; i++, psurf++)
 		{
-			if (psurf->texinfo->flags & (SURF_TRANS33|SURF_TRANS66) )
-			{	// add to the translucent chain
-				psurf->texturechain = r_alpha_surfaces;
-				r_alpha_surfaces = psurf;
-			}
-			else if ( qglMTexCoord2fSGIS && !( psurf->flags & SURF_DRAWTURB ) )
+			pplane = psurf->plane;
+			dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
+			if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
+				(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
 			{
-				GL_RenderLightmappedPoly( psurf );
+				if ( !( psurf->texinfo->flags & (SURF_TRANS33|SURF_TRANS66) ) &&
+					 !( psurf->flags & SURF_DRAWTURB ) )
+				{
+					GL_RenderLightmappedPoly( psurf );
+				}
 			}
-			else
+		}
+		gl_lm_update_pass = false;
+		GL_RenderLightmapChains();
+
+		// Pass 2: translucent and turb surfaces (already rendered MT surfaces are skipped)
+		psurf = &currentmodel->surfaces[currentmodel->firstmodelsurface];
+		for (i=0 ; i<currentmodel->nummodelsurfaces ; i++, psurf++)
+		{
+			pplane = psurf->plane;
+			dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
+			if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
+				(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
 			{
-				GL_EnableMultitexture( false );
-				R_RenderBrushPoly( psurf );
-				GL_EnableMultitexture( true );
+				if ( psurf->texinfo->flags & (SURF_TRANS33|SURF_TRANS66) )
+				{
+					psurf->texturechain = r_alpha_surfaces;
+					r_alpha_surfaces = psurf;
+				}
+				else if ( psurf->flags & SURF_DRAWTURB )
+				{
+					GL_EnableMultitexture( false );
+					R_RenderBrushPoly( psurf );
+					GL_EnableMultitexture( true );
+				}
 			}
 		}
 	}
-
-	if ( !(currententity->flags & RF_TRANSLUCENT) )
-	{
-		if ( !qglMTexCoord2fSGIS )
-			R_BlendLightmaps ();
-	}
 	else
+	{
+		//
+		// draw texture (single-TMU path)
+		//
+		for (i=0 ; i<currentmodel->nummodelsurfaces ; i++, psurf++)
+		{
+		// find which side of the node we are on
+			pplane = psurf->plane;
+			dot = DotProduct (modelorg, pplane->normal) - pplane->dist;
+
+		// draw the polygon
+			if (((psurf->flags & SURF_PLANEBACK) && (dot < -BACKFACE_EPSILON)) ||
+				(!(psurf->flags & SURF_PLANEBACK) && (dot > BACKFACE_EPSILON)))
+			{
+				if (psurf->texinfo->flags & (SURF_TRANS33|SURF_TRANS66) )
+				{	// add to the translucent chain
+					psurf->texturechain = r_alpha_surfaces;
+					r_alpha_surfaces = psurf;
+				}
+				else
+				{
+					GL_EnableMultitexture( false );
+					R_RenderBrushPoly( psurf );
+					GL_EnableMultitexture( true );
+				}
+			}
+		}
+		R_BlendLightmaps ();
+	}
+
+	if ( currententity->flags & RF_TRANSLUCENT )
 	{
 		qglDisable (GL_BLEND);
 		qglColor4f (1,1,1,1);
@@ -1226,10 +1339,23 @@ void R_DrawWorld (void)
 
 		if ( gl_lightmap->value )
 			GL_TexEnv( GL_REPLACE );
-		else 
+		else
 			GL_TexEnv( GL_MODULATE );
 
+		/* Update pass: BSP traversal uploads all dynamic lightmaps and
+		** builds a FIFO render chain.  All glTexSubImage2D calls happen
+		** before any draw, so MesaFX re-downloads each dirty atlas only
+		** once (at the first triangle that uses it) instead of once per
+		** dynamic surface. */
+		gl_lm_render_head = NULL;
+		gl_lm_render_tail = NULL;
+		gl_lm_update_pass = true;
 		R_RecursiveWorldNode (r_worldmodel->nodes);
+		gl_lm_update_pass = false;
+
+		/* Flush dirty atlases and draw FIFO chain.
+		** Update pass made no GL calls, so currenttextures state is unchanged. */
+		GL_RenderLightmapChains();
 
 		GL_EnableMultitexture( false );
 	}
@@ -1351,6 +1477,7 @@ void R_MarkLeaves (void)
 static void LM_InitBlock( void )
 {
 	memset( gl_lms.allocated, 0, sizeof( gl_lms.allocated ) );
+	memset( gl_lms.dyn_allocated, 0, sizeof( gl_lms.dyn_allocated ) );
 }
 
 static void LM_UploadBlock( qboolean dynamic )
@@ -1391,14 +1518,21 @@ static void LM_UploadBlock( qboolean dynamic )
 	}
 	else
 	{
-		qglTexImage2D( GL_TEXTURE_2D, 
-					   0, 
+		qglTexImage2D( GL_TEXTURE_2D,
+					   0,
 					   gl_lms.internal_format,
-					   BLOCK_WIDTH, BLOCK_HEIGHT, 
-					   0, 
-					   GL_LIGHTMAP_FORMAT, 
-					   GL_UNSIGNED_BYTE, 
+					   BLOCK_WIDTH, BLOCK_HEIGHT,
+					   0,
+					   GL_LIGHTMAP_FORMAT,
+					   GL_UNSIGNED_BYTE,
 					   gl_lms.lightmap_buffer );
+
+		/* Save baked static lightmap data for batched dynamic updates. */
+		if ( !gl_lms.atlas_cpu[texture] )
+			gl_lms.atlas_cpu[texture] = (byte *)malloc( BLOCK_WIDTH * BLOCK_HEIGHT * LIGHTMAP_BYTES );
+		if ( gl_lms.atlas_cpu[texture] )
+			memcpy( gl_lms.atlas_cpu[texture], gl_lms.lightmap_buffer, BLOCK_WIDTH * BLOCK_HEIGHT * LIGHTMAP_BYTES );
+
 		if ( ++gl_lms.current_lightmap_texture == MAX_LIGHTMAPS )
 			ri.Sys_Error( ERR_DROP, "LM_UploadBlock() - MAX_LIGHTMAPS exceeded\n" );
 	}
@@ -1435,6 +1569,42 @@ static qboolean LM_AllocBlock (int w, int h, int *x, int *y)
 
 	for (i=0 ; i<w ; i++)
 		gl_lms.allocated[*x + i] = best + h;
+
+	return true;
+}
+
+/* Per-frame allocator for the dlight scratch atlas (atlas 0).
+** Same algorithm as LM_AllocBlock but uses dyn_allocated[]. */
+static qboolean LM_DynAllocBlock (int w, int h, int *x, int *y)
+{
+	int		i, j;
+	int		best, best2;
+
+	best = BLOCK_HEIGHT;
+
+	for (i=0 ; i<BLOCK_WIDTH-w ; i++)
+	{
+		best2 = 0;
+
+		for (j=0 ; j<w ; j++)
+		{
+			if (gl_lms.dyn_allocated[i+j] >= best)
+				break;
+			if (gl_lms.dyn_allocated[i+j] > best2)
+				best2 = gl_lms.dyn_allocated[i+j];
+		}
+		if (j == w)
+		{	// valid position
+			*x = i;
+			*y = best = best2;
+		}
+	}
+
+	if (best + h > BLOCK_HEIGHT)
+		return false;
+
+	for (i=0 ; i<w ; i++)
+		gl_lms.dyn_allocated[*x + i] = best + h;
 
 	return true;
 }
@@ -1566,6 +1736,23 @@ void GL_BeginBuildingLightmaps (model_t *m)
 	unsigned		dummy[128*128];
 
 	memset( gl_lms.allocated, 0, sizeof(gl_lms.allocated) );
+
+	/* Free per-atlas CPU copies from the previous map and reset dirty ranges. */
+	{
+		int i;
+		for ( i = 0; i < MAX_LIGHTMAPS; i++ )
+		{
+			if ( gl_lms.atlas_cpu[i] )
+			{
+				free( gl_lms.atlas_cpu[i] );
+				gl_lms.atlas_cpu[i] = NULL;
+			}
+			gl_lms.atlas_dirty_min[i] = BLOCK_HEIGHT;
+			gl_lms.atlas_dirty_max[i] = 0;
+		}
+		/* Pre-allocate atlas 0; LM_UploadBlock(false) will overwrite with real data. */
+		gl_lms.atlas_cpu[0] = (byte *)calloc( BLOCK_WIDTH * BLOCK_HEIGHT * LIGHTMAP_BYTES, 1 );
+	}
 
 	r_framecount = 1;		// no dlightcache
 
