@@ -46,6 +46,7 @@ LDFLAGS = $(ABI) $(MIPSISA) -woff 15
 
 LIBS    = -L$(MESA_ROOT)/lib32 -lGL -lGLU \
           -L/usr/lib32 -lglide2x \
+          -lX11 \
           -laudio -lcdaudio -ldmedia \
           -lm -ldl
 

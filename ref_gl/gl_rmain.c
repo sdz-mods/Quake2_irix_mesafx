@@ -1369,7 +1369,7 @@ int R_Init( void *hinstance, void *hWnd )
 	{
 		if ( gl_ext_multitexture->value )
 		{
-			ri.Con_Printf( PRINT_ALL, "...using GL_ARB_multitexture (GL_SGIS_multitexture wrapper, haveTwoTMUs=1)\n" );
+			ri.Con_Printf( PRINT_ALL, "...using GL_ARB_multitexture (SGIS wrapper, haveTwoTMUs=1)\n" );
 			qglSelectTextureSGIS = mfx_SelectTextureSGIS;
 			qglMTexCoord2fSGIS   = mfx_MTexCoord2fSGIS;
 		}
